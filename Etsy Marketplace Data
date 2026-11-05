@@ -1,0 +1,239 @@
+--Verify the new table
+
+SELECT *
+FROM etsy_dataset_sample
+LIMIT 10;
+
+--Check the table's structure and size
+
+DESCRIBE TABLE etsy_dataset_sample;
+
+-- Count the rows
+
+SELECT COUNT(*) AS total_listings
+FROM etsy_dataset_sample;
+
+-- Profile the data
+
+SELECT
+    COUNT(*) AS total_rows,
+    COUNT(DISTINCT product_id) AS unique_products,
+    COUNT(DISTINCT seller_shop_name) AS unique_shops,
+    COUNT(DISTINCT root_category) AS unique_categories,
+
+    SUM(CASE WHEN product_id IS NULL THEN 1 ELSE 0 END)
+        AS missing_product_ids,
+    SUM(CASE WHEN final_price IS NULL THEN 1 ELSE 0 END)
+        AS missing_final_prices,
+    SUM(CASE WHEN currency IS NULL THEN 1 ELSE 0 END)
+        AS missing_currencies,
+    SUM(CASE WHEN rating IS NULL THEN 1 ELSE 0 END)
+        AS missing_ratings,
+
+    SUM(CASE WHEN final_price < 0 THEN 1 ELSE 0 END)
+        AS negative_prices
+FROM etsy_dataset_sample;
+
+-- Check how many rows each product has
+
+
+SELECT
+    product_id,
+    title,
+    root_category,
+    currency,
+    COUNT(*) AS rows_per_product,
+    MIN(final_price) AS lowest_price,
+    MAX(final_price) AS highest_price
+FROM etsy_dataset_sample
+GROUP BY
+    product_id,
+    title,
+    root_category,
+    currency
+ORDER BY rows_per_product DESC;
+
+-- Build a product-level summary
+
+CREATE OR REPLACE TEMP VIEW etsy_products_clean AS
+SELECT
+    product_id,
+    MAX(title) AS title,
+    MAX(root_category) AS root_category,
+    MAX(seller_shop_name) AS seller_shop_name,
+    MAX(rating) AS rating,
+    MAX(reviews_count_shop) AS reviews_count_shop,
+    MAX(reviews_count_item) AS reviews_count_item,
+    COUNT(*) AS source_rows,
+    COUNT(DISTINCT currency) AS currency_count,
+    MIN(CASE WHEN currency = 'USD' THEN final_price END)
+        AS lowest_usd_price,
+    MAX(CASE WHEN currency = 'USD' THEN final_price END)
+        AS highest_usd_price
+FROM etsy_dataset_sample
+GROUP BY product_id;
+
+-- Verify the clean view
+
+SELECT *
+FROM etsy_products_clean
+ORDER BY source_rows DESC;
+
+--Identify promising product categories
+
+SELECT
+    root_category,
+    COUNT(*) AS product_count,
+    ROUND(AVG(rating), 2) AS avg_rating,
+    ROUND(AVG(reviews_count_item), 1) AS avg_item_reviews,
+    SUM(CASE WHEN reviews_count_item > 0 THEN 1 ELSE 0 END)
+        AS products_with_item_reviews,
+    ROUND(AVG(lowest_usd_price), 2) AS avg_starting_price,
+    ROUND(AVG(highest_usd_price), 2) AS avg_highest_price
+FROM etsy_products_clean
+GROUP BY root_category
+ORDER BY product_count DESC;
+
+--Find the individual products with the strongest customer feedback
+
+SELECT
+    title,
+    root_category,
+    seller_shop_name,
+    rating,
+    reviews_count_item,
+    reviews_count_shop,
+    lowest_usd_price,
+    highest_usd_price,
+    source_rows
+FROM etsy_products_clean
+WHERE reviews_count_item > 0
+ORDER BY
+    reviews_count_item DESC,
+    rating DESC
+LIMIT 10;
+
+--Investigate whether variation complexity explains price differences
+
+
+SELECT
+    title,
+    root_category,
+    source_rows,
+    lowest_usd_price,
+    highest_usd_price,
+    ROUND(highest_usd_price - lowest_usd_price, 2)
+        AS price_range,
+    ROUND(
+        highest_usd_price / NULLIF(lowest_usd_price, 0),
+        2
+    ) AS highest_to_lowest_ratio
+FROM etsy_products_clean
+WHERE lowest_usd_price IS NOT NULL
+ORDER BY price_range DESC
+LIMIT 10;
+
+--Examine the actual variation data
+
+SELECT
+    product_id,
+    title,
+    final_price,
+    currency,
+    listing_inventory_id,
+    variation,
+    variations
+FROM etsy_dataset_sample
+WHERE product_id = 803356988
+ORDER BY final_price ASC
+LIMIT 15;
+
+--Quantify the customization opportunity
+
+SELECT
+    product_id,
+    COUNT(DISTINCT get_json_object(variation, '$[0].value'))
+        AS distinct_widths,
+    COUNT(DISTINCT get_json_object(variation, '$[1].value'))
+        AS distinct_lengths,
+    MIN(final_price) AS lowest_price,
+    MAX(final_price) AS highest_price,
+    ROUND(AVG(final_price), 2) AS average_variation_price
+FROM etsy_dataset_sample
+WHERE product_id = 803356988
+  AND currency = 'USD'
+GROUP BY product_id;
+
+--Compare customization across products
+
+SELECT
+    product_id,
+    MAX(title) AS title,
+    MAX(root_category) AS root_category,
+    COUNT(*) AS variation_records,
+    COUNT(DISTINCT get_json_object(variation, '$[0].value'))
+        AS first_option_count,
+    COUNT(DISTINCT get_json_object(variation, '$[1].value'))
+        AS second_option_count,
+    MIN(CASE WHEN currency = 'USD' THEN final_price END)
+        AS lowest_usd_price,
+    MAX(CASE WHEN currency = 'USD' THEN final_price END)
+        AS highest_usd_price
+FROM etsy_dataset_sample
+GROUP BY product_id
+HAVING COUNT(*) > 1
+ORDER BY variation_records DESC;
+
+-- Identify the types of customization
+
+SELECT
+    product_id,
+    MAX(title) AS title,
+    MAX(root_category) AS root_category,
+    get_json_object(variation, '$[0].type') AS first_option_type,
+    get_json_object(variation, '$[1].type') AS second_option_type,
+    COUNT(*) AS variation_records
+FROM etsy_dataset_sample
+WHERE variation IS NOT NULL
+  AND variation != ''
+GROUP BY
+    product_id,
+    get_json_object(variation, '$[0].type'),
+    get_json_object(variation, '$[1].type')
+ORDER BY variation_records DESC;
+
+--Categorize the customization strategies & build our opportunity scorecard
+
+
+SELECT
+    root_category,
+    COUNT(*) AS product_count,
+    ROUND(AVG(rating), 2) AS average_rating,
+    ROUND(AVG(reviews_count_item), 1) AS average_item_reviews,
+    ROUND(AVG(reviews_count_shop), 1) AS average_shop_reviews,
+    ROUND(AVG(highest_usd_price - lowest_usd_price), 2)
+        AS average_price_range,
+    COUNT(DISTINCT seller_shop_name) AS unique_sellers
+FROM etsy_products_clean
+GROUP BY root_category
+ORDER BY product_count DESC;
+
+-- To Make this visualization-ready
+
+CREATE OR REPLACE TABLE etsy_category_opportunity AS
+SELECT
+    root_category,
+    COUNT(*) AS product_count,
+    ROUND(AVG(rating), 2) AS average_rating,
+    ROUND(AVG(reviews_count_item), 1) AS average_item_reviews,
+    ROUND(AVG(reviews_count_shop), 1) AS average_shop_reviews,
+    ROUND(AVG(highest_usd_price - lowest_usd_price), 2) AS average_price_range,
+    COUNT(DISTINCT seller_shop_name) AS unique_sellers
+FROM etsy_products_clean
+GROUP BY root_category
+ORDER BY product_count DESC;
+
+-- Verify the clean view
+
+SELECT *
+FROM etsy_category_opportunity;
